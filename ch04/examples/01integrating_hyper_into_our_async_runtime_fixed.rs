@@ -256,6 +256,20 @@ impl tokio::io::AsyncWrite for CustomStream {
     }
 }
 
+impl hyper::client::connect::Connection for CustomStream {
+    fn connected(&self) -> hyper::client::connect::Connected {
+        hyper::client::connect::Connected::new()
+    }
+}
+
+async fn fetch(req: Request<Body>) -> Result<Response<Body>> {
+    Ok(Client::builder()
+        .executor(CustomExecutor)
+        .build::<_, Body>(CustomConnector)
+        .request(req)
+        .await?)
+}
+
 #[derive(Clone)]
 struct CustomConnector;
 
@@ -340,22 +354,18 @@ impl Future for BackgroundProcess {
 
 fn main() {
     Runtime::new().with_low_num(2).with_high_num(4).run();
-    let url = "http://www.rust-lang.org";
-    let uri: Uri = url.parse().expect("Failed to parse URI");
-
-    let request = Request::builder()
-        .method("GET")
-        .uri(uri)
-        .header("User-Agent", "hyper/0.14.2")
-        .body(hyper::Body::empty())
-        .expect("Failed to build request");
 
     let future = async {
-        let client = Client::new();
-        client.request(request).await.unwrap()
-    };
+        let req = Request::get("https://www.rust-lang.org")
+            .body(Body::empty())
+            .unwrap();
+        let response = fetch(req).await.unwrap();
 
+        let body_bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+
+        let html = String::from_utf8(body_bytes.to_vec()).unwrap();
+        println!("{html}");
+    };
     let test = spawn_task!(future);
-    let response = future::block_on(test);
-    println!("Response: {:?}", response);
+    let _outcome = future::block_on(test);
 }
