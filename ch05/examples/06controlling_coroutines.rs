@@ -1,97 +1,114 @@
 #![feature(coroutines)]
 #![feature(coroutine_trait)]
 
+use rand::Rng;
 use std::{
-    collections::VecDeque,
-    future::Future,
     ops::{Coroutine, CoroutineState},
     pin::Pin,
     task::{Context, Poll},
-    time::Instant,
+    time::Duration,
 };
 
-struct Excecutor {
-    coroutines: VecDeque<Pin<Box<dyn Coroutine<(), Yield = (), Return = ()>>>>,
+struct RandCoRoutine {
+    pub value: u8,
+    pub live: bool,
 }
 
-impl Excecutor {
+impl RandCoRoutine {
     fn new() -> Self {
-        Self {
-            coroutines: VecDeque::new(),
-        }
+        let mut coroutine = Self {
+            value: 0,
+            live: true,
+        };
+        coroutine.generate();
+        coroutine
     }
 
-    fn add(&mut self, coroutine: Pin<Box<dyn Coroutine<(), Yield = (), Return = ()>>>) {
-        self.coroutines.push_back(coroutine);
-    }
-
-    // Queue からコルーチンを取り出して実行する
-    // 完了しなかったら再度 Queue に戻す
-    fn poll(&mut self) {
-        println!("Polling {} coroutines", self.coroutines.len());
-        let mut coroutine = self.coroutines.pop_front().unwrap();
-        if let CoroutineState::Yielded(_) = coroutine.as_mut().resume(()) {
-            self.coroutines.push_back(coroutine);
-        }
+    fn generate(&mut self) {
+        let mut rng = rand::thread_rng();
+        self.value = rng.gen_range(0..=10);
     }
 }
 
-// pausing of execution のデモ
-struct SleepCoroutine {
-    pub start: Instant,
-    pub duration: std::time::Duration,
-}
-
-impl SleepCoroutine {
-    fn new(duration: std::time::Duration) -> Self {
-        Self {
-            start: Instant::now(),
-            duration,
-        }
-    }
-}
-
-impl Coroutine<()> for SleepCoroutine {
-    type Yield = ();
+impl Coroutine<()> for RandCoRoutine {
+    type Yield = u8;
     type Return = ();
 
-    // このメソッドを呼び出した構造体の作成時からの経過時間が
-    // その構造体に設定された duration を超えている場合のみ、またそのときのみ完了する
-    fn resume(self: Pin<&mut Self>, _arg: ()) -> CoroutineState<Self::Yield, Self::Return> {
-        if self.start.elapsed() >= self.duration {
-            CoroutineState::Complete(())
-        } else {
-            CoroutineState::Yielded(())
-        }
+    // このメソッドを呼び出すたびに、0 から 10 の乱数を生成して返す
+    fn resume(mut self: Pin<&mut Self>, _arg: ()) -> CoroutineState<Self::Yield, Self::Return> {
+        self.generate();
+        CoroutineState::Yielded(self.value)
     }
 }
 
-impl Future for SleepCoroutine {
+struct NestingFuture {
+    inner: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl Future for NestingFuture {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self).resume(()) {
-            CoroutineState::Complete(_) => Poll::Ready(()),
-            CoroutineState::Yielded(_) => {
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+        match self.inner.as_mut().poll(cx) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
         }
     }
 }
 
 fn main() {
-    let mut executor = Excecutor::new();
+    let mut coroutine = Vec::new();
+    for _ in 0..10 {
+        coroutine.push(RandCoRoutine::new());
+    }
+    let mut total: u32 = 0;
 
-    for _ in 0..3 {
-        let coroutine = SleepCoroutine::new(std::time::Duration::from_secs(1));
-        executor.add(Box::pin(coroutine));
+    loop {
+        let mut all_dead = true;
+        for mut coroutine in coroutine.iter_mut() {
+            if coroutine.live {
+                all_dead = false;
+                match Pin::new(&mut coroutine).resume(()) {
+                    CoroutineState::Yielded(result) => {
+                        total += result as u32;
+                    }
+                    CoroutineState::Complete(_) => {
+                        panic!("Coroutine should not complete yet");
+                    }
+                }
+
+                if coroutine.value < 9 {
+                    coroutine.live = false;
+                }
+            }
+        }
+        if all_dead {
+            break;
+        }
     }
 
-    let start = Instant::now();
-    while !executor.coroutines.is_empty() {
-        executor.poll();
-    }
+    // ---
+    let (sender, receiver) = std::sync::mpsc::channel::<RandCoRoutine>();
+    let _thread = std::thread::spawn(move || {
+        loop {
+            let mut coroutine = match receiver.recv() {
+                Ok(coroutine) => coroutine,
+                Err(_) => break,
+            };
+            match Pin::new(&mut coroutine).resume(()) {
+                CoroutineState::Yielded(result) => {
+                    println!("Coroutine yielded: {}", result);
+                }
+                CoroutineState::Complete(_) => {
+                    panic!("Coroutine should not complete");
+                }
+            }
+        }
+    });
+    std::thread::sleep(Duration::from_secs(1));
+    sender.send(RandCoRoutine::new()).unwrap();
+    sender.send(RandCoRoutine::new()).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
 
-    println!("Took {:?}", start.elapsed());
+    println!("Total: {}", total);
 }
