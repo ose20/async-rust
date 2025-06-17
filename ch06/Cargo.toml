@@ -1,0 +1,11 @@
+[package]
+name = "ch06"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1.26", features = ["full"] }
+futures = "0.3.28"
+clearscreen = "2.0.1"
+# terminal からの入力を受け取る
+device_query = "1.1.3"
