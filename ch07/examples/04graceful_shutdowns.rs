@@ -90,7 +90,7 @@ async fn main() {
         println!("All futures completed");
     });
     tokio::signal::ctrl_c().await.unwrap();
-    println!("crtl-c received!");
+    println!("ctrl-c received!");
     let complete_counter = get_complete_count().await;
     println!("Complete Counter: {:?}", complete_counter);
 }
